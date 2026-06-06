@@ -1,0 +1,44 @@
+{
+  "version": 4,
+  "terraform_version": "1.14.8",
+  "serial": 224,
+  "lineage": "c932f335-9632-e267-77b2-268b6548ade1",
+  "outputs": {},
+  "resources": [],
+  "check_results": [
+    {
+      "object_kind": "var",
+      "config_addr": "var.environment",
+      "status": "unknown",
+      "objects": [
+        {
+          "object_addr": "var.environment",
+          "status": "unknown"
+        }
+      ]
+    },
+    {
+      "object_kind": "var",
+      "config_addr": "var.compliance_frameworks",
+      "status": "unknown",
+      "objects": [
+        {
+          "object_addr": "var.compliance_frameworks",
+          "status": "unknown"
+        }
+      ]
+    },
+    {
+      "object_kind": "var",
+      "config_addr": "var.sizing_profile",
+      "status": "unknown",
+      "objects": null
+    },
+    {
+      "object_kind": "var",
+      "config_addr": "var.az_count",
+      "status": "unknown",
+      "objects": null
+    }
+  ]
+}
