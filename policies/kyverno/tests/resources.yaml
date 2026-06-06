@@ -1,0 +1,299 @@
+# ============================================================================
+# Test fixtures — good and bad resources for the baseline policies.
+# ============================================================================
+
+# --- 10 — requests/limits ----------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-requests
+  namespace: team-alpha
+spec:
+  containers:
+    - name: app
+      image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/app:v1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-requests
+  namespace: team-alpha
+spec:
+  containers:
+    - name: app
+      image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/app:v1
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+
+# --- 11 — :latest disallowed -------------------------------------------------
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-latest
+  namespace: team-alpha
+spec:
+  containers:
+    - name: app
+      image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/app:latest
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-pinned-tag
+  namespace: team-alpha
+spec:
+  containers:
+    - name: app
+      image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/app:v1.2.3
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+
+# --- 12 — approved registries ------------------------------------------------
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-dockerhub
+  namespace: team-alpha
+spec:
+  containers:
+    - name: app
+      image: docker.io/library/nginx:1.27
+      resources:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits: { memory: 256Mi }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-from-ecr
+  namespace: team-alpha
+spec:
+  containers:
+    - name: app
+      image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/app:v1.2.3
+      resources:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits: { memory: 256Mi }
+
+# --- 20 — restrict service types --------------------------------------------
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-nodeport
+  namespace: team-alpha
+spec:
+  type: NodePort
+  selector:
+    app: foo
+  ports:
+    - port: 80
+      targetPort: 8080
+      nodePort: 30080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-clusterip
+  namespace: team-alpha
+spec:
+  type: ClusterIP
+  selector:
+    app: foo
+  ports:
+    - port: 80
+      targetPort: 8080
+
+# --- 21 — required labels ----------------------------------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deploy-no-labels
+  namespace: team-alpha
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: foo
+  template:
+    metadata:
+      labels:
+        app: foo
+    spec:
+      containers:
+        - name: app
+          image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/app:v1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deploy-with-labels
+  namespace: team-alpha
+  labels:
+    app.kubernetes.io/name: foo
+    app.kubernetes.io/part-of: team-alpha
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: foo
+  template:
+    metadata:
+      labels:
+        app: foo
+        app.kubernetes.io/name: foo
+        app.kubernetes.io/part-of: team-alpha
+    spec:
+      containers:
+        - name: app
+          image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/app:v1
+
+# --- 30 — block cluster-admin ------------------------------------------------
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crb-cluster-admin
+subjects:
+  - kind: User
+    name: alice
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crb-view
+subjects:
+  - kind: User
+    name: alice
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+
+# --- 40 — storage policies --------------------------------------------------
+
+# 40.a — PVC missing storageClassName (fail require-storageclass)
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-no-sc
+  namespace: team-alpha
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+
+# 40.b — PVC on unapproved storage class (fail restrict-storageclass)
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-gp2
+  namespace: team-alpha
+spec:
+  storageClassName: gp2
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+
+# 40.c — PVC on approved storage class with right access mode (pass)
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-gp3
+  namespace: team-alpha
+spec:
+  storageClassName: gp3-encrypted
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+
+# 40.d — EFS PVC requesting ReadWriteOnce (fail efs-rwx-only)
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-efs-rwo
+  namespace: team-alpha
+spec:
+  storageClassName: efs-shared
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+
+# 40.e — EFS PVC with ReadWriteMany (pass)
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-efs-rwx
+  namespace: team-alpha
+spec:
+  storageClassName: efs-shared
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 10Gi
+
+# 40.f — Pod with hostPath in tenant namespace (fail block-hostpath)
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-hostpath
+  namespace: team-alpha
+spec:
+  containers:
+    - name: app
+      image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/app:v1
+      resources:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits: { memory: 256Mi }
+  volumes:
+    - name: data
+      hostPath:
+        path: /var/lib/data
+
+# 40.g — Pod with no hostPath in tenant namespace (pass)
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-hostpath
+  namespace: team-alpha
+spec:
+  containers:
+    - name: app
+      image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/app:v1
+      resources:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits: { memory: 256Mi }

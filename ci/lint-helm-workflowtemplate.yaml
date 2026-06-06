@@ -1,0 +1,81 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: lint-helm
+  namespace: argo
+spec:
+  entrypoint: main
+  serviceAccountName: ci-runner
+  arguments:
+    parameters:
+      - {name: repo-url, value: ""}
+      - {name: revision, value: "main"}
+      - {name: chart-path, value: "mgmt-cluster-aws"}
+
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: checkout
+            template: checkout
+            arguments:
+              parameters:
+                - {name: repo-url, value: "{{workflow.parameters.repo-url}}"}
+                - {name: revision, value: "{{workflow.parameters.revision}}"}
+
+          - name: helm-lint
+            template: helm-lint
+            dependencies: [checkout]
+            arguments:
+              parameters:
+                - {name: chart-path, value: "{{workflow.parameters.chart-path}}"}
+
+          - name: yamllint
+            template: yamllint
+            dependencies: [checkout]
+
+    - name: checkout
+      inputs:
+        parameters:
+          - {name: repo-url}
+          - {name: revision}
+      script:
+        image: alpine/git:v2.45.2
+        command: [/bin/sh, -c]
+        source: |
+          git clone --depth 1 -b {{inputs.parameters.revision}} {{inputs.parameters.repo-url}} /workspace
+        volumeMounts:
+          - {name: workspace, mountPath: /workspace}
+
+    - name: helm-lint
+      inputs:
+        parameters:
+          - {name: chart-path}
+      script:
+        image: alpine/helm:3.15.4
+        command: [/bin/sh, -c]
+        source: |
+          set -e
+          cd /workspace/{{inputs.parameters.chart-path}}
+          # Lint each chart in values/, treating gotmpl files as plain values first
+          for f in values/*.yaml.gotmpl; do
+            [ -f "$f" ] || continue
+            base="${f%.gotmpl}"
+            envsubst < "$f" > "$base"
+            helm lint "$(dirname "$base")/.." --values "$base"
+          done
+        volumeMounts:
+          - {name: workspace, mountPath: /workspace}
+
+    - name: yamllint
+      script:
+        image: cytopia/yamllint:1.35
+        command: [/bin/sh, -c]
+        source: |
+          yamllint -c .yamllint /workspace
+        volumeMounts:
+          - {name: workspace, mountPath: /workspace}
+
+  volumes:
+    - name: workspace
+      emptyDir: {}

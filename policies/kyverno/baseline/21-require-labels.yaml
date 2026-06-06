@@ -1,0 +1,47 @@
+# ============================================================================
+# Kyverno: Require app labels + drop dangling resources
+# ----------------------------------------------------------------------------
+# Every workload object must carry the standard Kubernetes recommended labels
+# (app.kubernetes.io/name, /component, /part-of, /managed-by). Without them,
+# observability dashboards (Mimir/Loki/Tempo) cannot correlate metrics, logs,
+# and traces across cluster boundaries.
+# ============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-standard-labels
+  annotations:
+    policies.kyverno.io/title: Require standard Kubernetes labels
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: low
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-app-name
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+                - StatefulSet
+                - DaemonSet
+                - Job
+                - CronJob
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+      validate:
+        message: >-
+          Workload must carry app.kubernetes.io/name and app.kubernetes.io/part-of
+          labels (https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/).
+        pattern:
+          metadata:
+            labels:
+              app.kubernetes.io/name: "?*"
+              app.kubernetes.io/part-of: "?*"

@@ -1,0 +1,92 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: conftest-terraform
+  namespace: argo
+spec:
+  entrypoint: main
+  serviceAccountName: ci-runner
+  arguments:
+    parameters:
+      - {name: repo-url, value: ""}
+      - {name: revision, value: "main"}
+      - {name: tf-path, value: "platform-fleet"}
+
+  templates:
+    - name: main
+      steps:
+        - - name: checkout
+            template: checkout
+            arguments:
+              parameters:
+                - {name: repo-url, value: "{{workflow.parameters.repo-url}}"}
+                - {name: revision, value: "{{workflow.parameters.revision}}"}
+        - - name: plan
+            template: plan
+            arguments:
+              parameters:
+                - {name: tf-path, value: "{{workflow.parameters.tf-path}}"}
+        - - name: conftest
+            template: conftest
+            arguments:
+              parameters:
+                - {name: tf-path, value: "{{workflow.parameters.tf-path}}"}
+
+    - name: checkout
+      inputs:
+        parameters:
+          - {name: repo-url}
+          - {name: revision}
+      script:
+        image: alpine/git:v2.45.2
+        command: [/bin/sh, -c]
+        source: |
+          git clone --depth 1 -b {{inputs.parameters.revision}} {{inputs.parameters.repo-url}} /workspace
+        volumeMounts:
+          - {name: workspace, mountPath: /workspace}
+
+    - name: plan
+      inputs:
+        parameters:
+          - {name: tf-path}
+      script:
+        image: hashicorp/terraform:1.9.8
+        command: [/bin/sh, -c]
+        source: |
+          set -e
+          mkdir -p /tmp/plans
+          cd /workspace/{{inputs.parameters.tf-path}}
+          for dir in $(find . -name "*.tf" -exec dirname {} \; | sort -u); do
+            (cd "$dir" && terraform init -backend=false -input=false)
+            (cd "$dir" && terraform plan -input=false -no-color -out=/tmp/plans/$(basename "$dir").tfplan)
+            (cd "$dir" && terraform show -json /tmp/plans/$(basename "$dir").tfplan > /tmp/plans/$(basename "$dir").json)
+          done
+        volumeMounts:
+          - {name: workspace, mountPath: /workspace}
+          - {name: plans, mountPath: /tmp/plans}
+
+    - name: conftest
+      inputs:
+        parameters:
+          - {name: tf-path}
+      script:
+        image: openpolicyagent/conftest:v0.55.0
+        command: [/bin/sh, -c]
+        source: |
+          set -e
+          echo "Running OPA/Conftest policy checks..."
+          conftest test --policy /policies --parser json /tmp/plans/*.json --output stdout
+        volumeMounts:
+          - {name: policies, mountPath: /policies}
+          - {name: plans, mountPath: /tmp/plans}
+        env:
+          - {name: CONFTEST_POLICY, value: /policies}
+
+  volumes:
+    - name: workspace
+      emptyDir: {}
+    - name: policies
+      configMap:
+        name: conftest-policies
+    - name: plans
+      emptyDir: {}

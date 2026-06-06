@@ -1,0 +1,192 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: lint-terraform
+  namespace: argo
+  labels:
+    app.kubernetes.io/component: ci
+    app.kubernetes.io/part-of: platform-fleet
+spec:
+  entrypoint: main
+  serviceAccountName: ci-runner
+  arguments:
+    parameters:
+      - name: repo-url
+        value: ""
+      - name: revision
+        value: "main"
+      - name: tf-path
+        value: "platform-fleet"
+
+  templates:
+    # ===========================================================================
+    # Main entrypoint
+    # ===========================================================================
+    - name: main
+      dag:
+        tasks:
+          - name: checkout
+            template: checkout
+            arguments:
+              parameters:
+                - {name: repo-url, value: "{{workflow.parameters.repo-url}}"}
+                - {name: revision, value: "{{workflow.parameters.revision}}"}
+
+          - name: fmt
+            template: fmt-check
+            dependencies: [checkout]
+            arguments:
+              parameters:
+                - {name: tf-path, value: "{{workflow.parameters.tf-path}}"}
+
+          - name: validate
+            template: validate
+            dependencies: [fmt]
+            arguments:
+              parameters:
+                - {name: tf-path, value: "{{workflow.parameters.tf-path}}"}
+
+          - name: tflint
+            template: tflint
+            dependencies: [validate]
+            arguments:
+              parameters:
+                - {name: tf-path, value: "{{workflow.parameters.tf-path}}"}
+
+          - name: tfsec
+            template: tfsec
+            dependencies: [validate]
+            arguments:
+              parameters:
+                - {name: tf-path, value: "{{workflow.parameters.tf-path}}"}
+
+          - name: conftest
+            template: conftest
+            dependencies: [fmt]
+            arguments:
+              parameters:
+                - {name: tf-path, value: "{{workflow.parameters.tf-path}}"}
+
+    # ===========================================================================
+    # Steps
+    # ===========================================================================
+    - name: checkout
+      inputs:
+        parameters:
+          - {name: repo-url}
+          - {name: revision}
+      script:
+        image: alpine/git:v2.45.2
+        command: [/bin/sh, -c]
+        source: |
+          git clone --depth 1 -b {{inputs.parameters.revision}} {{inputs.parameters.repo-url}} /workspace
+          cd /workspace
+          git log -1 --pretty=oneline
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+
+    - name: fmt-check
+      inputs:
+        parameters:
+          - {name: tf-path}
+      script:
+        image: hashicorp/terraform:1.9.8
+        command: [/bin/sh, -c]
+        source: |
+          set -e
+          cd /workspace/{{inputs.parameters.tf-path}}
+          terraform fmt -check -recursive -diff
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+
+    - name: validate
+      inputs:
+        parameters:
+          - {name: tf-path}
+      script:
+        image: hashicorp/terraform:1.9.8
+        command: [/bin/sh, -c]
+        source: |
+          set -e
+          cd /workspace/{{inputs.parameters.tf-path}}
+          for dir in $(find . -name "*.tf" -exec dirname {} \; | sort -u); do
+            echo "==> Validating $dir"
+            (cd "$dir" && terraform init -backend=false -input=false && terraform validate)
+          done
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+      resources:
+        requests: {cpu: 500m, memory: 512Mi}
+        limits:   {cpu: 2000m, memory: 2Gi}
+
+    - name: tflint
+      inputs:
+        parameters:
+          - {name: tf-path}
+      script:
+        image: ghcr.io/terraform-linters/tflint:v0.54.0
+        command: [/bin/sh, -c]
+        source: |
+          cd /workspace/{{inputs.parameters.tf-path}}
+          tflint --init
+          tflint --recursive --format compact
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+
+    - name: tfsec
+      inputs:
+        parameters:
+          - {name: tf-path}
+      script:
+        image: aquasec/tfsec:v1.28.6
+        command: [/bin/sh, -c]
+        source: |
+          cd /workspace/{{inputs.parameters.tf-path}}
+          tfsec --soft-fail=false --format junit --out /tmp/tfsec.xml .
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+          - name: results
+            mountPath: /tmp
+
+    - name: conftest
+      inputs:
+        parameters:
+          - {name: tf-path}
+      script:
+        image: openpolicyagent/conftest:v0.55.0
+        command: [/bin/sh, -c]
+        source: |
+          set -e
+          # First convert HCL to JSON via terraform plan
+          cd /workspace/{{inputs.parameters.tf-path}}
+          for dir in $(find . -name "*.tf" -exec dirname {} \; | sort -u); do
+            cd "$dir"
+            terraform init -backend=false -input=false >/dev/null
+            terraform plan -input=false -no-color -out=tfplan.binary >/dev/null
+            terraform show -json tfplan.binary > tfplan.json
+            conftest test --policy /policies/terraform.rego --parser json tfplan.json || true
+            rm -f tfplan.binary tfplan.json
+            cd /workspace/{{inputs.parameters.tf-path}}
+          done
+        volumeMounts:
+          - name: policies
+            mountPath: /policies
+          - name: workspace
+            mountPath: /workspace
+        env:
+          - name: CONFTEST_POLICY
+            value: /policies
+
+  volumes:
+    - name: workspace
+      emptyDir: {}
+    - name: policies
+      configMap:
+        name: conftest-policies
+    - name: results
+      emptyDir: {}

@@ -1,0 +1,79 @@
+# ============================================================================
+# Kyverno: Approved container registries only
+# ----------------------------------------------------------------------------
+# Block image pulls from anywhere other than the org's approved registries.
+# Prevents dependency-confusion-style supply-chain attacks where a typo
+# pulls a malicious image from Docker Hub instead of our internal ECR.
+#
+# Approved registries (env-aware):
+#   - <account>.dkr.ecr.<region>.amazonaws.com/*  (own ECR)
+#   - ghcr.io/<org>/*                              (org GHCR)
+#   - quay.io/<org>/*                              (org Quay)
+#   - public.ecr.aws/*                             (AWS public ECR for base
+#                                                   images — Bottlerocket etc.)
+#   - registry.k8s.io/*                            (upstream K8s)
+# ============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: allowed-registries
+  annotations:
+    policies.kyverno.io/title: Allowed image registries
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+spec:
+  validationFailureAction: {{ if eq .Environment.Values.environment "prod" }}Enforce{{ else }}Audit{{ end }}
+  background: true
+  rules:
+    - name: from-approved-registries
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+      validate:
+        message: >-
+          Image must be pulled from an approved registry: own ECR, ghcr.io,
+          quay.io (org), public.ecr.aws, or registry.k8s.io. Reach out to
+          #platform-security if you need a new registry added.
+        foreach:
+          - list: "request.object.spec.containers"
+            deny:
+              conditions:
+                all:
+                  - key: "{{`{{ element.image }}`}}"
+                    operator: NotMatch
+                    value: "*.dkr.ecr.*.amazonaws.com/*"
+                  - key: "{{`{{ element.image }}`}}"
+                    operator: NotMatch
+                    value: "ghcr.io/{{ .Environment.Values.github_org | default \"my-org\" }}/*"
+                  - key: "{{`{{ element.image }}`}}"
+                    operator: NotMatch
+                    value: "quay.io/{{ .Environment.Values.github_org | default \"my-org\" }}/*"
+                  - key: "{{`{{ element.image }}`}}"
+                    operator: NotMatch
+                    value: "public.ecr.aws/*"
+                  - key: "{{`{{ element.image }}`}}"
+                    operator: NotMatch
+                    value: "registry.k8s.io/*"
+          - list: "request.object.spec.initContainers || []"
+            deny:
+              conditions:
+                all:
+                  - key: "{{`{{ element.image }}`}}"
+                    operator: NotMatch
+                    value: "*.dkr.ecr.*.amazonaws.com/*"
+                  - key: "{{`{{ element.image }}`}}"
+                    operator: NotMatch
+                    value: "public.ecr.aws/*"
+                  - key: "{{`{{ element.image }}`}}"
+                    operator: NotMatch
+                    value: "registry.k8s.io/*"

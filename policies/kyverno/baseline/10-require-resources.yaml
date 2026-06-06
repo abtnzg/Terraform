@@ -1,0 +1,81 @@
+# ============================================================================
+# Kyverno: Require resource requests and limits
+# ----------------------------------------------------------------------------
+# Without requests, the scheduler treats pods as zero-cost — they get binpacked
+# onto any node, then OOMKilled when memory runs out. Without limits, a single
+# runaway pod can starve its neighbours.
+#
+# Enforce both for every container, except in kube-system (kube-proxy etc.
+# have their own QoS).
+# ============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-requests-and-limits
+  annotations:
+    policies.kyverno.io/title: Require requests and limits
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Pod
+spec:
+  validationFailureAction: {{ if eq .Environment.Values.environment "prod" }}Enforce{{ else }}Audit{{ end }}
+  background: true
+  rules:
+    - name: containers-need-requests
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system]
+      validate:
+        message: "All containers must declare CPU and memory requests."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+
+    - name: containers-need-memory-limit
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system]
+      validate:
+        message: "All containers must declare a memory limit (prevents OOM noisy-neighbour)."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  limits:
+                    memory: "?*"
+
+    - name: requests-should-not-exceed-limits
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+      validate:
+        message: "CPU/memory request cannot exceed the corresponding limit."
+        foreach:
+          - list: "request.object.spec.containers"
+            deny:
+              conditions:
+                any:
+                  - key: "{{`{{ element.resources.requests.cpu || '' }}`}}"
+                    operator: GreaterThan
+                    value: "{{`{{ element.resources.limits.cpu || '999' }}`}}"
+                  - key: "{{`{{ element.resources.requests.memory || '0' }}`}}"
+                    operator: GreaterThan
+                    value: "{{`{{ element.resources.limits.memory || '999Ti' }}`}}"

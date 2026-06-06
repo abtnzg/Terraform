@@ -1,0 +1,299 @@
+# ============================================================================
+# Kyverno: Storage guard rails
+# ----------------------------------------------------------------------------
+# Enforces the storage strategy from ADR-0010:
+#   - gp3-encrypted (default), io2-stateful (prod), gp3-throughput (batch)
+#   - efs-shared (RWX dynamic), efs-archive (long-term, Retain)
+#   - s3-mountpoint (read-mostly, static PVs only)
+#
+# Block:
+#   - hostPath volumes in tenant namespaces (data exfiltration, escape vector)
+#   - PVCs without an explicit storageClassName
+#   - PVCs / PVs using unapproved storage classes
+#   - PVCs requesting accessModes not in the approved set
+#   - PVCs / PVs in platform namespaces (kube-system, argocd, etc.)
+#   - PV creation outside platform team (cluster-scoped blast radius)
+# ============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-storageclass
+  annotations:
+    policies.kyverno.io/title: PVCs must declare an explicit storageClassName
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: {{ if eq .Environment.Values.environment "prod" }}Enforce{{ else }}Audit{{ end }}
+  background: true
+  rules:
+    - name: storageclass-must-be-set
+      match:
+        any:
+          - resources:
+              kinds: [PersistentVolumeClaim]
+              operations: [CREATE, UPDATE]
+              namespaces:
+                - "team-*"
+                - "app-*"
+                - "prod-*"
+                - "staging-*"
+      validate:
+        message: >-
+          PVCs must declare an explicit `spec.storageClassName`. The empty
+          default (gp2 / standard) is forbidden — it is unencrypted and
+          falls outside our retention / backup policy.
+        pattern:
+          spec:
+            =(storageClassName): "?*"
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-storageclass
+  annotations:
+    policies.kyverno.io/title: Restrict PVCs to platform-managed StorageClasses
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: critical
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: sc-must-be-approved
+      match:
+        any:
+          - resources:
+              kinds: [PersistentVolumeClaim]
+              operations: [CREATE, UPDATE]
+              namespaces:
+                - "team-*"
+                - "app-*"
+                - "prod-*"
+                - "staging-*"
+      validate:
+        message: >-
+          storageClassName must be one of:
+            - gp3-encrypted     (default, encrypted EBS, 3000 IOPS)
+            - io2-stateful      (prod databases, 16000 IOPS, Retain)
+            - gp3-throughput    (analytics, 4000 IOPS, 1000 MB/s)
+            - efs-shared        (RWX shared, dynamic access points)
+            - efs-archive       (long-term, Retain, IA transition)
+            - s3-mountpoint     (read-mostly bulk data, static PVs)
+          Open a ticket to #platform-storage to add a new class.
+        anyPattern:
+          - spec:
+              storageClassName: "gp3-encrypted"
+          - spec:
+              storageClassName: "io2-stateful"
+          - spec:
+              storageClassName: "gp3-throughput"
+          - spec:
+              storageClassName: "efs-shared"
+          - spec:
+              storageClassName: "efs-archive"
+          - spec:
+              storageClassName: "s3-mountpoint"
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-pv-access-modes
+  annotations:
+    policies.kyverno.io/title: Restrict PVC accessModes per data class
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    # EFS / S3: only ReadWriteMany is meaningful
+    - name: efs-rwx-only
+      match:
+        any:
+          - resources:
+              kinds: [PersistentVolumeClaim]
+              operations: [CREATE, UPDATE]
+      preconditions:
+        all:
+          - key: "{{`{{ request.object.spec.storageClassName }}`}}"
+            operator: AnyIn
+            value:
+              - "efs-shared"
+              - "efs-archive"
+              - "s3-mountpoint"
+      validate:
+        message: >-
+          EFS / S3 Mountpoint StorageClasses require `ReadWriteMany`.
+          They are network filesystems; ReadWriteOnce has no meaning.
+        pattern:
+          spec:
+            accessModes:
+              - "ReadWriteMany"
+
+    # EBS: ReadWriteOnce only (RWO is the EBS model; RWX is unsupported
+    # by the EBS CSI driver and silently falls back to ReadWriteOnce anyway)
+    - name: ebs-rwo-only
+      match:
+        any:
+          - resources:
+              kinds: [PersistentVolumeClaim]
+              operations: [CREATE, UPDATE]
+      preconditions:
+        all:
+          - key: "{{`{{ request.object.spec.storageClassName }}`}}"
+            operator: AnyIn
+            value:
+              - "gp3-encrypted"
+              - "io2-stateful"
+              - "gp3-throughput"
+      validate:
+        message: >-
+          EBS-backed StorageClasses (gp3-*, io2-*) only support
+          `ReadWriteOnce`. Use `efs-shared` if you need RWX.
+        pattern:
+          spec:
+            accessModes:
+              - "ReadWriteOnce"
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: block-hostpath
+  annotations:
+    policies.kyverno.io/title: Block hostPath volumes in tenant workloads
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: critical
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: no-hostpath
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+              namespaces:
+                - "team-*"
+                - "app-*"
+                - "prod-*"
+                - "staging-*"
+      validate:
+        message: >-
+          `hostPath` volumes are forbidden in tenant namespaces. They
+          bypass the storage policy, escape the namespace boundary, and
+          make data residency (GDPR / HIPAA) unauditable. If you need
+          a real volume, use a PVC bound to an approved StorageClass.
+        pattern:
+          spec:
+            =(volumes):
+              - X(hostPath): {}
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-pv-creation
+  annotations:
+    policies.kyverno.io/title: Only platform team may create PersistentVolumes
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: critical
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    # PVs are cluster-scoped and bypass namespace quotas. They are also
+    # how static-provisioned storage classes (s3-mountpoint) bind. Limit
+    # creation to the platform team; everything else is dynamic.
+    - name: pv-requires-platform-group
+      match:
+        any:
+          - resources:
+              kinds: [PersistentVolume]
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - subjects:
+              - kind: Group
+                name: "platform-admins"
+              - kind: Group
+                name: "system:masters"
+      validate:
+        message: >-
+          PersistentVolumes are cluster-scoped and bypass namespace
+          quotas. Only the platform team (`platform-admins` group) may
+          create them. Dynamic provisioning via PVC + StorageClass is
+          the default path.
+        deny: {}
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-pvc-creation-by-namespace
+  annotations:
+    policies.kyverno.io/title: PVCs only in tenant namespaces
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: pvc-not-in-system-ns
+      match:
+        any:
+          - resources:
+              kinds: [PersistentVolumeClaim]
+              operations: [CREATE]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - "team-*"
+                - "app-*"
+                - "prod-*"
+                - "staging-*"
+                - "dev-*"
+                - "sandbox-*"
+      validate:
+        message: >-
+          PVCs may only be created in tenant namespaces
+          (team-*, app-*, prod-*, staging-*, dev-*, sandbox-*).
+          Platform namespaces use platform-managed storage.
+        deny: {}
+
+---
+# ----------------------------------------------------------------------------
+# Mutations: inject the default StorageClass when omitted, so dynamic
+# provisioning lands on gp3-encrypted rather than the upstream `gp2`.
+# ----------------------------------------------------------------------------
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: mutate-default-storageclass
+  annotations:
+    policies.kyverno.io/title: Set default storageClassName on PVCs
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: medium
+spec:
+  background: false
+  rules:
+    - name: set-gp3-encrypted
+      match:
+        any:
+          - resources:
+              kinds: [PersistentVolumeClaim]
+              operations: [CREATE]
+              namespaces:
+                - "team-*"
+                - "app-*"
+                - "prod-*"
+                - "staging-*"
+                - "dev-*"
+                - "sandbox-*"
+      mutate:
+        patchStrategicMerge:
+          spec:
+            +(storageClassName): "gp3-encrypted"

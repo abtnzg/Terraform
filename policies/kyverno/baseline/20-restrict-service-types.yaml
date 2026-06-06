@@ -1,0 +1,43 @@
+# ============================================================================
+# Kyverno: Disallow NodePort + LoadBalancer Service types
+# ----------------------------------------------------------------------------
+# NodePort opens the random 30000-32767 port range on every node — surface
+# area we don't want exposed past the NLB. LoadBalancer per-service creates
+# duplicate cloud LBs (cost + sprawl). Everything must go through the shared
+# Gateway API gateway (see ADR-0008).
+# ============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-service-types
+  annotations:
+    policies.kyverno.io/title: Restrict Service types to ClusterIP
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Service
+spec:
+  validationFailureAction: {{ if eq .Environment.Values.environment "prod" }}Enforce{{ else }}Audit{{ end }}
+  background: true
+  rules:
+    - name: only-clusterip-or-headless
+      match:
+        any:
+          - resources:
+              kinds: [Service]
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                # Envoy Gateway provisions a LoadBalancer for the shared
+                # platform Gateway — exempt that namespace only.
+                - envoy-gateway-system
+                - kube-system
+      validate:
+        message: >-
+          Service.spec.type must be ClusterIP. Expose via HTTPRoute on the
+          shared platform Gateway (see ADR-0008). NodePort / LoadBalancer
+          are reserved for the platform.
+        pattern:
+          spec:
+            (type): "ClusterIP | None"

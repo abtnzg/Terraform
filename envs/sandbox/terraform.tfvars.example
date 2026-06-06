@@ -1,0 +1,43 @@
+# ============================================================================
+# Sandbox Environment
+# ============================================================================
+# A tiny footprint for the test/sandbox AWS account. Driven by the
+# `sizing_profile = "sandbox"` switch (ADR-0011):
+#   - t3.small / t3.medium bootstrap MNG, 1-3 nodes, 30 GB disk
+#   - gp3 1000 IOPS / 50 MB/s default
+#   - EFS bursting (cheapest throughput mode)
+#   - S3 without Object-Lock and without INTELLIGENT_TIERING transitions
+#   - CloudWatch log retention: 7 days
+#   - Vault in dev mode (in-memory, no Raft, no KMS auto-unseal)
+#   - Karpenter ships only the `system` pool (1-2 nodes, t3 family)
+#   - All platform controllers (Kyverno, ArgoCD, Argo Workflows, OTel,
+#     cert-manager, external-secrets, gatekeeper) at 1 replica
+#
+# Cost ceiling: ~$300/month per cluster (excluding data transfer).
+# ----------------------------------------------------------------------------
+
+environment        = "sandbox"
+aws_region         = "us-east-1"
+sizing_profile     = "sandbox"
+
+# Sandbox lives in a single-AZ subset of the region. We keep az_count=2 only
+# so EFS still gets two mount targets (EFS needs one per AZ to provide HA
+# on the mount side; the data plane is regional regardless).
+vpc_cidr           = "10.50.0.0/16"
+az_count           = 2
+enable_azure       = false
+enable_gcp         = false
+compliance_frameworks = []
+
+eks_cluster_version   = "1.31"
+# node_min/max/desired_size + node_disk_size are now driven by
+# `sizing_profile` in locals.tf. Override here only if a one-off custom
+# instance mix is required.
+
+github_org = "your-org"
+github_repos = [
+  "platform-fleet",
+  "gitops-fleet",
+  "gitops-apps",
+  "policies",
+]

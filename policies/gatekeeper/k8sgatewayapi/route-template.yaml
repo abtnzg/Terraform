@@ -1,0 +1,65 @@
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sgatewayapiroute
+  annotations:
+    description: "HTTPRoute must attach to an approved Gateway and use an approved hostname pattern"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sGatewayRoute
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            allowedGateways:
+              type: array
+              items:
+                type: string
+            allowedHostnames:
+              type: array
+              items:
+                type: string
+            deniedHostnames:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sgatewayapiroute
+
+        import future.keywords.in
+
+        # parentRef.namespace defaults to the HTTPRoute's own namespace when omitted.
+        parent_ns(ref) := ref.namespace { ref.namespace }
+        parent_ns(ref) := input.review.object.metadata.namespace { not ref.namespace }
+
+        violation[{"msg": msg}] {
+          ref := input.review.object.spec.parentRefs[_]
+          composite := sprintf("%s/%s", [parent_ns(ref), ref.name])
+          not composite in input.parameters.allowedGateways
+          not ref.name in input.parameters.allowedGateways
+          msg := sprintf("HTTPRoute attaches to %q; only approved Gateways allowed", [composite])
+        }
+
+        violation[{"msg": msg}] {
+          hostname := input.review.object.spec.hostnames[_]
+          denied := input.parameters.deniedHostnames[_]
+          glob.match(denied, [], hostname)
+          msg := sprintf("HTTPRoute hostname %q matches denied pattern %q", [hostname, denied])
+        }
+
+        violation[{"msg": msg}] {
+          input.parameters.allowedHostnames
+          count(input.parameters.allowedHostnames) > 0
+          hostname := input.review.object.spec.hostnames[_]
+          not allowed(hostname, input.parameters.allowedHostnames)
+          msg := sprintf("HTTPRoute hostname %q does not match any allowed pattern", [hostname])
+        }
+
+        allowed(hostname, patterns) {
+          pattern := patterns[_]
+          glob.match(pattern, [], hostname)
+        }

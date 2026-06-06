@@ -1,0 +1,130 @@
+# Kyverno test fixtures — exercise the baseline policies against good and bad
+# resources. Run with: `kyverno test policies/kyverno/tests/`
+name: baseline-policy-tests
+policies:
+  - ../baseline/10-require-resources.yaml
+  - ../baseline/11-disallow-latest.yaml
+  - ../baseline/12-allowed-registries.yaml
+  - ../baseline/20-restrict-service-types.yaml
+  - ../baseline/21-require-labels.yaml
+  - ../baseline/30-multi-tenancy.yaml
+  - ../baseline/40-storage.yaml
+resources:
+  - resources.yaml
+results:
+  # 10 — require-requests-and-limits
+  - policy: require-requests-and-limits
+    rule: containers-need-requests
+    resource: pod-no-requests
+    kind: Pod
+    result: fail
+  - policy: require-requests-and-limits
+    rule: containers-need-requests
+    resource: pod-with-requests
+    kind: Pod
+    result: pass
+
+  # 11 — disallow-latest
+  - policy: disallow-latest-require-digest
+    rule: no-latest-tag
+    resource: pod-latest
+    kind: Pod
+    result: fail
+  - policy: disallow-latest-require-digest
+    rule: no-latest-tag
+    resource: pod-pinned-tag
+    kind: Pod
+    result: pass
+
+  # 12 — allowed-registries
+  - policy: allowed-registries
+    rule: from-approved-registries
+    resource: pod-dockerhub
+    kind: Pod
+    result: fail
+  - policy: allowed-registries
+    rule: from-approved-registries
+    resource: pod-from-ecr
+    kind: Pod
+    result: pass
+
+  # 20 — restrict-service-types
+  - policy: restrict-service-types
+    rule: only-clusterip-or-headless
+    resource: svc-nodeport
+    kind: Service
+    result: fail
+  - policy: restrict-service-types
+    rule: only-clusterip-or-headless
+    resource: svc-clusterip
+    kind: Service
+    result: pass
+
+  # 21 — require-standard-labels
+  - policy: require-standard-labels
+    rule: require-app-name
+    resource: deploy-no-labels
+    kind: Deployment
+    result: fail
+  - policy: require-standard-labels
+    rule: require-app-name
+    resource: deploy-with-labels
+    kind: Deployment
+    result: pass
+
+  # 30 — block-cluster-admin
+  - policy: block-cluster-admin-binding
+    rule: no-cluster-admin
+    resource: crb-cluster-admin
+    kind: ClusterRoleBinding
+    result: fail
+  - policy: block-cluster-admin-binding
+    rule: no-cluster-admin
+    resource: crb-view
+    kind: ClusterRoleBinding
+    result: pass
+
+  # 40 — storage policies
+  - policy: require-storageclass
+    rule: storageclass-must-be-set
+    resource: pvc-no-sc
+    kind: PersistentVolumeClaim
+    result: fail
+  - policy: require-storageclass
+    rule: storageclass-must-be-set
+    resource: pvc-gp3
+    kind: PersistentVolumeClaim
+    result: pass
+
+  - policy: restrict-storageclass
+    rule: sc-must-be-approved
+    resource: pvc-gp2
+    kind: PersistentVolumeClaim
+    result: fail
+  - policy: restrict-storageclass
+    rule: sc-must-be-approved
+    resource: pvc-gp3
+    kind: PersistentVolumeClaim
+    result: pass
+
+  - policy: restrict-pv-access-modes
+    rule: efs-rwx-only
+    resource: pvc-efs-rwo
+    kind: PersistentVolumeClaim
+    result: fail
+  - policy: restrict-pv-access-modes
+    rule: efs-rwx-only
+    resource: pvc-efs-rwx
+    kind: PersistentVolumeClaim
+    result: pass
+
+  - policy: block-hostpath
+    rule: no-hostpath
+    resource: pod-hostpath
+    kind: Pod
+    result: fail
+  - policy: block-hostpath
+    rule: no-hostpath
+    resource: pod-no-hostpath
+    kind: Pod
+    result: pass

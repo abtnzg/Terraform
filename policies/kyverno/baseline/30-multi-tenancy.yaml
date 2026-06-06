@@ -1,0 +1,141 @@
+# ============================================================================
+# Kyverno: Multi-tenancy — namespace + RBAC + quota guard rails
+# ----------------------------------------------------------------------------
+# - Block ClusterRoleBindings to `cluster-admin` outside the platform team
+# - Block deletion of ResourceQuota / LimitRange in tenant namespaces
+# - Block direct creation of Pods (must be owned by a controller)
+# - Block use of the `default` ServiceAccount in tenant namespaces
+# ============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: block-cluster-admin-binding
+  annotations:
+    policies.kyverno.io/title: Block ClusterRoleBinding → cluster-admin
+    policies.kyverno.io/category: Multi-Tenancy
+    policies.kyverno.io/severity: critical
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: no-cluster-admin
+      match:
+        any:
+          - resources:
+              kinds: [ClusterRoleBinding, RoleBinding]
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - subjects:
+              # The platform team is allowed cluster-admin
+              - kind: Group
+                name: "platform-admins"
+      validate:
+        message: >-
+          ClusterRoleBinding/RoleBinding may not grant `cluster-admin`.
+          Use a least-privilege Role or ClusterRole. Contact #platform-security
+          if you genuinely need cluster-admin.
+        pattern:
+          roleRef:
+            name: "!cluster-admin"
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: protect-resource-quotas
+  annotations:
+    policies.kyverno.io/title: Protect ResourceQuota and LimitRange in tenant NS
+    policies.kyverno.io/category: Multi-Tenancy
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: no-delete-quota
+      match:
+        any:
+          - resources:
+              kinds: [ResourceQuota, LimitRange]
+              operations: [DELETE]
+              namespaces:
+                - "team-*"
+                - "app-*"
+                - "prod-*"
+                - "staging-*"
+      exclude:
+        any:
+          - subjects:
+              - kind: Group
+                name: "platform-admins"
+      validate:
+        message: >-
+          ResourceQuota and LimitRange in tenant namespaces are platform-managed.
+          Open a ticket to #platform if quota needs to change.
+        deny: {}
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: no-bare-pods
+  annotations:
+    policies.kyverno.io/title: Disallow bare Pods (must be owned)
+    policies.kyverno.io/category: Multi-Tenancy
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: {{ if eq .Environment.Values.environment "prod" }}Enforce{{ else }}Audit{{ end }}
+  background: true
+  rules:
+    - name: pods-need-controller
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - argo  # Argo Workflows pods are owned by Workflows, not bare
+      validate:
+        message: >-
+          Bare Pods are not allowed. Use a Deployment / StatefulSet / Job /
+          CronJob — anything that can be safely re-scheduled.
+        pattern:
+          metadata:
+            ownerReferences:
+              - apiVersion: "?*"
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: no-default-sa
+  annotations:
+    policies.kyverno.io/title: Disallow use of the `default` ServiceAccount
+    policies.kyverno.io/category: Multi-Tenancy
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: {{ if eq .Environment.Values.environment "prod" }}Enforce{{ else }}Audit{{ end }}
+  background: true
+  rules:
+    - name: explicit-sa-required
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+              namespaces:
+                - "team-*"
+                - "app-*"
+                - "prod-*"
+                - "staging-*"
+      validate:
+        message: >-
+          Workloads must specify an explicit ServiceAccount (not `default`).
+          The `default` SA has implicit token mounting and breaks audit trails.
+        pattern:
+          spec:
+            =(serviceAccountName): "!default"

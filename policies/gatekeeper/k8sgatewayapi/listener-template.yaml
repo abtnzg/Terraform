@@ -1,0 +1,57 @@
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sgatewayapilistener
+  annotations:
+    description: "Gateway listeners must use TLS termination (HTTPS) and reference the approved cert"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sGatewayListener
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            allowedSecretNames:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sgatewayapilistener
+
+        violation[{"msg": msg}] {
+          listener := input.review.object.spec.listeners[_]
+          listener.protocol != "HTTPS"
+          not is_tls_passthrough(listener)
+          msg := sprintf("Gateway listener %q uses protocol %q; only HTTPS (or TLS passthrough) allowed", [listener.name, listener.protocol])
+        }
+
+        violation[{"msg": msg}] {
+          listener := input.review.object.spec.listeners[_]
+          listener.protocol == "TLS"
+          listener.tls.mode != "Passthrough"
+          msg := sprintf("Gateway TLS listener %q must be Passthrough (we terminate TLS in Envoy, not in Gateway)", [listener.name])
+        }
+
+        violation[{"msg": msg}] {
+          listener := input.review.object.spec.listeners[_]
+          listener.protocol == "HTTPS"
+          not listener.tls.certificateRefs
+          msg := sprintf("Gateway HTTPS listener %q is missing certificateRefs", [listener.name])
+        }
+
+        violation[{"msg": msg}] {
+          listener := input.review.object.spec.listeners[_]
+          listener.protocol == "HTTPS"
+          ref := listener.tls.certificateRefs[_]
+          not ref.name in input.parameters.allowedSecretNames
+          msg := sprintf("Gateway HTTPS listener %q references cert %q; only approved certs allowed", [listener.name, ref.name])
+        }
+
+        is_tls_passthrough(listener) {
+          listener.protocol == "TLS"
+          listener.tls.mode == "Passthrough"
+        }

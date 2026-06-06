@@ -1,0 +1,15 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sAllowedRepos
+metadata:
+  name: approved-registries
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+  parameters:
+    repos:
+      - "123456789012.dkr.ecr.us-east-1.amazonaws.com/"
+      - "gcr.io/your-gcp-project/"
+      - "ghcr.io/your-org/"
+      - "registry.k8s.io/"

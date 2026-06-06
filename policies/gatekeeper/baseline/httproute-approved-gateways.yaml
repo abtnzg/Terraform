@@ -1,0 +1,30 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sGatewayRoute
+metadata:
+  name: httproute-approved-gateways
+spec:
+  match:
+    kinds:
+      - apiGroups: ["gateway.networking.k8s.io"]
+        kinds: ["HTTPRoute", "GRPCRoute"]
+  parameters:
+    # HTTPRoutes may only attach to the shared platform Gateway.
+    # Reference format: "namespace/name". Wildcards not allowed.
+    allowedGateways:
+      - "envoy-gateway-system/platform"
+    # Block wildcard hostnames (security: prevents accidental expose of
+    # internal services via a catch-all listener).
+    deniedHostnames:
+      - "*"
+      - "*.*"
+      - "*.local"
+    # HTTPRoute hostnames must match one of these patterns. In dev/staging
+    # we allow internal test hostnames; in prod, only real DNS names.
+    allowedHostnames:
+      - "*.platform.example.com"
+      - "*.platform.stg.example.com"
+      - "*.platform.prod.example.com"
+      - "argocd.*"
+      - "argo.*"
+      - "vault.*"
+      - "otel.*"

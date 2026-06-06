@@ -1,0 +1,30 @@
+# ============================================================================
+# Production Environment
+# ============================================================================
+# Single region (us-east-1), private API endpoint, full compliance.
+# ----------------------------------------------------------------------------
+
+environment        = "prod"
+aws_region         = "us-east-1"
+sizing_profile     = "production"
+
+vpc_cidr           = "10.20.0.0/16"
+az_count           = 3
+enable_azure       = false
+enable_gcp         = false
+compliance_frameworks = ["soc2", "iso27001", "gdpr"]
+
+eks_cluster_version   = "1.31"
+# node_min/max/desired_size + node_disk_size are driven by sizing_profile.
+
+# IMPORTANT: rotate or replace this value with a Secrets Manager reference.
+# platform_admin_password is intentionally NOT a tfvar. It is fetched at apply
+# time via data "aws_secretsmanager_secret_version".
+
+github_org = "your-org"
+github_repos = [
+  "platform-fleet",
+  "gitops-fleet",
+  "gitops-apps",
+  "policies",
+]

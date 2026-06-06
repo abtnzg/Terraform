@@ -1,0 +1,90 @@
+# ============================================================================
+# GitHub Actions: lint Helm charts and YAML
+# ============================================================================
+
+name: lint-helm
+
+on:
+  pull_request:
+    paths:
+      - 'mgmt-cluster-*/**'
+      - 'gitops-fleet/**'
+      - 'gitops-apps/**'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  helm:
+    name: Lint Helm charts
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run helm-diff
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE }}
+          aws-region: us-east-1
+        continue-on-error: true   # only for diffing in real envs
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Setup Helmfile
+        uses: helmpack/helmfile-action@v1
+        with:
+          version: v0.169.2
+
+      - name: helm lint
+        run: |
+          set -e
+          for f in $(find mgmt-cluster-aws/values -name "*.yaml.gotmpl"); do
+            base="${f%.gotmpl}"
+            envsubst < "$f" > "$base"
+            chart="$(dirname "$base")/.."
+            echo "==> Linting $chart with $base"
+            helm lint "$chart" --values "$base"
+            rm -f "$base"
+          done
+
+      - name: yamllint
+        run: |
+          docker run --rm -v "$PWD:/workspace" cytopia/yamllint:1.35 -c .yamllint /workspace
+
+  oci:
+    name: Build & sign container image
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE: platform/ci-runner
+          TAG: ${{ github.sha }}
+        run: |
+          docker build -t "$REGISTRY/$IMAGE:$TAG" -f platform-fleet/ci/Dockerfile.ci-runner .
+          docker push "$REGISTRY/$IMAGE:$TAG"
+          echo "image=$REGISTRY/$IMAGE:$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Sign with cosign
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE: platform/ci-runner
+          TAG: ${{ github.sha }}
+        run: |
+          cosign sign --yes "$REGISTRY/$IMAGE:$TAG"

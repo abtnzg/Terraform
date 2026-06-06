@@ -1,0 +1,84 @@
+# ============================================================================
+# GitHub Actions: equivalent of the Argo WorkflowTemplates, for OSS-style PRs
+# ----------------------------------------------------------------------------
+# These run on every PR to platform-fleet, gitops-fleet, gitops-apps, policies.
+# They are the public-facing CI surface; the Argo ones are for in-cluster runs.
+# ============================================================================
+
+name: lint-terraform
+
+on:
+  pull_request:
+    paths:
+      - 'platform-fleet/**/*.tf'
+      - 'platform-fleet/**/*.tfvars'
+      - 'policies/conftest/**'
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write   # for OIDC
+  contents: read
+
+jobs:
+  terraform:
+    name: Lint & validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: Terraform fmt
+        run: |
+          terraform fmt -check -recursive -diff platform-fleet/
+
+      - name: Terraform validate
+        run: |
+          set -e
+          for dir in $(find platform-fleet -name "*.tf" -exec dirname {} \; | sort -u); do
+            echo "==> $dir"
+            (cd "$dir" && terraform init -backend=false -input=false && terraform validate)
+          done
+
+      - name: TFLint
+        run: tflint --recursive --format compact
+        working-directory: platform-fleet
+
+      - name: tfsec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: platform-fleet
+          soft_fail: false
+
+      - name: Conftest (OPA) on Terraform plan
+        run: |
+          set -e
+          docker run --rm -v "$PWD:/src" -v "$PWD/policies/conftest:/policy" \
+            openpolicyagent/conftest:v0.55.0 \
+            test --policy /policy --parser hcl2 /src/platform-fleet --output stdout || true
+
+      - name: Trivy config scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: config
+          scan-ref: platform-fleet
+          format: sarif
+          output: trivy-terraform.sarif
+        continue-on-error: true
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-terraform.sarif

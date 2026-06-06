@@ -1,0 +1,74 @@
+# ============================================================================
+# Kyverno: Disallow :latest, require digest pin
+# ----------------------------------------------------------------------------
+# Using :latest (or no tag) makes rollouts non-deterministic: the same Deployment
+# manifest can pull a different image at any time. SLSA L2+ also requires that
+# every image reference is reproducible — which means pinning to an immutable
+# digest, not a mutable tag.
+# ============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-require-digest
+  annotations:
+    policies.kyverno.io/title: Disallow :latest, require digest
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+spec:
+  validationFailureAction: {{ if eq .Environment.Values.environment "prod" }}Enforce{{ else }}Audit{{ end }}
+  background: true
+  rules:
+    - name: no-latest-tag
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system]
+      validate:
+        message: "Container images must not use the :latest tag."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
+
+    - name: require-image-digest-in-prod
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+              namespaces:
+                - "prod-*"
+                - "production-*"
+      validate:
+        message: "Production images must be pinned by digest (image@sha256:...)."
+        pattern:
+          spec:
+            containers:
+              - image: "*@sha256:*"
+
+    - name: no-tag-at-all
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system]
+      validate:
+        message: "Container image must specify an explicit tag or digest."
+        foreach:
+          - list: "request.object.spec.containers"
+            deny:
+              conditions:
+                all:
+                  - key: "{{`{{ regex_match('^[^:@]+$', element.image) }}`}}"
+                    operator: Equals
+                    value: true

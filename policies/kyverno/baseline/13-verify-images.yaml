@@ -1,0 +1,115 @@
+# ============================================================================
+# Kyverno: Verify cosign image signatures + attestations
+# ----------------------------------------------------------------------------
+# Every image deployed into the cluster must be:
+#   1. signed by the org's cosign key (or matching keyless certificate identity)
+#   2. accompanied by a SLSA provenance attestation
+#   3. accompanied by an SBOM attestation
+#
+# This is the linchpin of SLSA L3 — without it, the build pipeline can be
+# bypassed by simply pushing an unsigned image into ECR by hand.
+#
+# Verifications happen at admission (synchronous). Attestation checks are
+# heavier and run in the background.
+# ============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    policies.kyverno.io/title: Verify cosign signatures
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/subject: Pod
+spec:
+  validationFailureAction: {{ if eq .Environment.Values.environment "prod" }}Enforce{{ else }}Audit{{ end }}
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: cosign-keyless-verify
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+              namespaces:
+                # Only enforce on workload namespaces, not platform/system
+                - "team-*"
+                - "app-*"
+                - "prod-*"
+                - "staging-*"
+      verifyImages:
+        - imageReferences:
+            - "*.dkr.ecr.*.amazonaws.com/*"
+            - "ghcr.io/{{ .Environment.Values.github_org | default \"my-org\" }}/*"
+          attestors:
+            - count: 1
+              entries:
+                # Keyless verification via Fulcio: subject must match a known
+                # GitHub Actions workflow path.
+                - keyless:
+                    subject: "https://github.com/{{ .Environment.Values.github_org | default \"my-org\" }}/*/.github/workflows/release.yaml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-attestations
+  annotations:
+    policies.kyverno.io/title: Verify SLSA provenance + SBOM attestations
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: critical
+spec:
+  validationFailureAction: Audit
+  rules:
+    - name: slsa-provenance
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+              namespaces:
+                - "prod-*"
+                - "staging-*"
+      verifyImages:
+        - imageReferences:
+            - "*.dkr.ecr.*.amazonaws.com/*"
+          attestations:
+            - type: https://slsa.dev/provenance/v1
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: "https://github.com/slsa-framework/slsa-github-generator/*"
+                        issuer: "https://token.actions.githubusercontent.com"
+                        rekor:
+                          url: https://rekor.sigstore.dev
+              conditions:
+                - all:
+                    - key: "{{`{{ buildDefinition.buildType }}`}}"
+                      operator: Equals
+                      value: "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
+
+    - name: sbom-attached
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+              namespaces:
+                - "prod-*"
+      verifyImages:
+        - imageReferences:
+            - "*.dkr.ecr.*.amazonaws.com/*"
+          attestations:
+            - type: https://spdx.dev/Document
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: "https://github.com/{{ .Environment.Values.github_org | default \"my-org\" }}/*"
+                        issuer: "https://token.actions.githubusercontent.com"

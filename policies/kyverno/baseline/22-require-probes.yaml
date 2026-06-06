@@ -1,0 +1,90 @@
+# ============================================================================
+# Kyverno: Require liveness + readiness probes
+# ----------------------------------------------------------------------------
+# Without probes, K8s cannot tell when a pod is unhealthy and won't restart
+# it. Without readiness, the Service routes traffic to pods that haven't
+# finished starting → 5xx spikes during deploy.
+# ============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-probes
+  annotations:
+    policies.kyverno.io/title: Require liveness + readiness probes
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: containers-need-readiness
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system]
+      validate:
+        message: "All containers must declare a readinessProbe."
+        pattern:
+          spec:
+            containers:
+              - readinessProbe:
+                  =(httpGet): "*"
+                  =(tcpSocket): "*"
+                  =(exec): "*"
+                  =(grpc): "*"
+
+    - name: containers-need-liveness
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system]
+      validate:
+        message: "All containers must declare a livenessProbe."
+        pattern:
+          spec:
+            containers:
+              - livenessProbe:
+                  =(httpGet): "*"
+                  =(tcpSocket): "*"
+                  =(exec): "*"
+                  =(grpc): "*"
+
+    - name: readiness-and-liveness-differ
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system]
+      preconditions:
+        all:
+          - key: "{{`{{ length(request.object.spec.containers[?(@.livenessProbe && @.readinessProbe)]) }}`}}"
+            operator: GreaterThan
+            value: 0
+      validate:
+        message: >-
+          livenessProbe and readinessProbe should not be identical — they
+          serve different purposes (restart vs. traffic routing). Use a
+          lightweight check for liveness and a more thorough check for
+          readiness.
+        foreach:
+          - list: "request.object.spec.containers"
+            deny:
+              conditions:
+                all:
+                  - key: "{{`{{ element.livenessProbe }}`}}"
+                    operator: Equals
+                    value: "{{`{{ element.readinessProbe }}`}}"

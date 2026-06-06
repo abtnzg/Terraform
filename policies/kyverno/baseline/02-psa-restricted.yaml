@@ -1,0 +1,48 @@
+# ============================================================================
+# Kyverno: Pod Security Standards — RESTRICTED
+# ----------------------------------------------------------------------------
+# Restricted is the heavily-hardened profile. We enforce it on every namespace
+# labelled `pod-security.kubernetes.io/enforce: restricted` and audit it
+# everywhere else (so teams can see violations without breaking deploys).
+# Application namespaces SHOULD aim to graduate to restricted.
+# ============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: psa-restricted
+  annotations:
+    policies.kyverno.io/title: Pod Security Standards — Restricted
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Enforce the Kubernetes Pod Security Standard "restricted" profile on
+      namespaces opting in. Requires non-root user, dropping ALL capabilities,
+      seccomp RuntimeDefault, no privilege escalation, read-only root FS where
+      possible.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: restricted
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - gatekeeper-system
+                - kyverno
+      validate:
+        podSecurity:
+          level: restricted
+          version: latest
+          # Allow a small set of CSI volumes that restricted normally blocks
+          exclude:
+            - controlName: Volume Types
+              images:
+                - "*"

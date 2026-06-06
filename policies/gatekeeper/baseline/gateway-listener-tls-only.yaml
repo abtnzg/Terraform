@@ -1,0 +1,15 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sGatewayListener
+metadata:
+  name: platform-gateway-listener-tls-only
+spec:
+  match:
+    kinds:
+      - apiGroups: ["gateway.networking.k8s.io"]
+        kinds: ["Gateway"]
+    namespaces:
+      - envoy-gateway-system
+  parameters:
+    allowedSecretNames:
+      - "platform-tls"
+      - "letsencrypt-prod-account-key"

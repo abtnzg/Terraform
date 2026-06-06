@@ -1,0 +1,263 @@
+# ============================================================================
+# Kyverno: Mutations — sensible security defaults injected automatically
+# ----------------------------------------------------------------------------
+# These run BEFORE validation and silently fix the common cases. Without them
+# you reject 80% of innocent pod manifests; with them, the security policy is
+# the path of least resistance.
+#
+# Patterns added:
+#   1. securityContext defaults (runAsNonRoot, drop ALL caps, seccomp)
+#   2. automountServiceAccountToken=false unless explicitly set
+#   3. topologySpreadConstraints across AZs for any Deployment with >1 replica
+#   4. priorityClassName=workload-default if not set
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 1. Default securityContext
+# ----------------------------------------------------------------------------
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: mutate-default-securitycontext
+  annotations:
+    policies.kyverno.io/title: Inject secure-by-default securityContext
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: medium
+spec:
+  background: false
+  rules:
+    - name: add-pod-securitycontext
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system]
+      mutate:
+        patchStrategicMerge:
+          spec:
+            securityContext:
+              +(runAsNonRoot): true
+              +(seccompProfile):
+                type: RuntimeDefault
+              +(fsGroupChangePolicy): OnRootMismatch
+
+    - name: add-container-securitycontext
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system]
+      mutate:
+        foreach:
+          - list: "request.object.spec.containers"
+            patchStrategicMerge:
+              spec:
+                containers:
+                  - name: "{{`{{ element.name }}`}}"
+                    securityContext:
+                      +(allowPrivilegeEscalation): false
+                      +(capabilities):
+                        drop: [ALL]
+                      +(runAsNonRoot): true
+
+---
+# ----------------------------------------------------------------------------
+# 2. Disable SA token automount unless the workload opts in
+# ----------------------------------------------------------------------------
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: mutate-disable-sa-token-automount
+  annotations:
+    policies.kyverno.io/title: Disable SA token automount by default
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: medium
+spec:
+  background: false
+  rules:
+    - name: disable-automount
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system, kyverno, gatekeeper-system, argocd, argo, vault, external-secrets]
+      mutate:
+        patchStrategicMerge:
+          spec:
+            +(automountServiceAccountToken): false
+
+---
+# ----------------------------------------------------------------------------
+# 3. Topology spread across zones for multi-replica Deployments
+# ----------------------------------------------------------------------------
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: mutate-topology-spread
+  annotations:
+    policies.kyverno.io/title: Inject zonal topologySpreadConstraints
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+spec:
+  background: false
+  rules:
+    - name: spread-replicas-across-zones
+      match:
+        any:
+          - resources:
+              kinds: [Deployment]
+              operations: [CREATE]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system]
+      preconditions:
+        all:
+          - key: "{{`{{ request.object.spec.replicas || 1 }}`}}"
+            operator: GreaterThanOrEquals
+            value: 2
+      mutate:
+        patchStrategicMerge:
+          spec:
+            template:
+              spec:
+                +(topologySpreadConstraints):
+                  - maxSkew: 1
+                    topologyKey: topology.kubernetes.io/zone
+                    whenUnsatisfiable: ScheduleAnyway
+                    labelSelector:
+                      matchLabels:
+                        app.kubernetes.io/name: "{{`{{ request.object.metadata.labels.\"app.kubernetes.io/name\" || request.object.metadata.name }}`}}"
+
+---
+# ----------------------------------------------------------------------------
+# 4. Default priorityClassName on workloads
+# ----------------------------------------------------------------------------
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: mutate-default-priorityclass
+  annotations:
+    policies.kyverno.io/title: Set workload priority class
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: low
+spec:
+  background: false
+  rules:
+    - name: assign-default-priority
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE]
+              namespaces:
+                - "team-*"
+                - "app-*"
+                - "prod-*"
+                - "staging-*"
+      mutate:
+        patchStrategicMerge:
+          spec:
+            +(priorityClassName): workload-default
+
+---
+# ----------------------------------------------------------------------------
+# 5. Auto-generate NetworkPolicy default-deny per new namespace
+# ----------------------------------------------------------------------------
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: generate-default-deny-netpol
+  annotations:
+    policies.kyverno.io/title: Default-deny NetworkPolicy for every new NS
+    policies.kyverno.io/category: Multi-Tenancy
+    policies.kyverno.io/severity: high
+spec:
+  generateExisting: false
+  rules:
+    - name: default-deny
+      match:
+        any:
+          - resources:
+              kinds: [Namespace]
+              operations: [CREATE]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+      generate:
+        synchronize: true
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: default-deny-all
+        namespace: "{{`{{ request.object.metadata.name }}`}}"
+        data:
+          spec:
+            podSelector: {}
+            policyTypes: [Ingress, Egress]
+            egress:
+              # Allow DNS to kube-dns
+              - to:
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: kube-system
+                ports:
+                  - protocol: UDP
+                    port: 53
+
+---
+# ----------------------------------------------------------------------------
+# 6. Auto-generate ResourceQuota per new tenant namespace
+# ----------------------------------------------------------------------------
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: generate-default-quota
+  annotations:
+    policies.kyverno.io/title: Default ResourceQuota for tenant NS
+    policies.kyverno.io/category: Multi-Tenancy
+    policies.kyverno.io/severity: high
+spec:
+  generateExisting: false
+  rules:
+    - name: tenant-quota
+      match:
+        any:
+          - resources:
+              kinds: [Namespace]
+              operations: [CREATE]
+              selector:
+                matchExpressions:
+                  - key: tenant
+                    operator: Exists
+      generate:
+        synchronize: true
+        apiVersion: v1
+        kind: ResourceQuota
+        name: tenant-default
+        namespace: "{{`{{ request.object.metadata.name }}`}}"
+        data:
+          spec:
+            hard:
+              requests.cpu: "10"
+              requests.memory: 20Gi
+              limits.cpu: "20"
+              limits.memory: 40Gi
+              persistentvolumeclaims: "10"
+              services.loadbalancers: "0"   # blocked anyway by 20-restrict-service-types
+              services.nodeports: "0"
